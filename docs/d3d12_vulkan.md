@@ -748,9 +748,9 @@ The compute path, end to end:
   - A malformed index (bad numbers or `\u` escapes) is refused with an error instead of throwing into the shim,
     and an integer field outside 0..2^32−1 reads as 0.
 - Root signatures use the model already on `main` (`runtime/src/root_signature.h`, `rt::rootsig`): `parse_rts0`
-  reads the serialized blob and `pack()` lays out the 32 user-data dwords by the section 3.5 default mapping,
-  refusing anything that would spill. `pack_stage()` lays them out in the console layout of one stage (section 3.5,
-  D3D-448); the compute bind point uses it.
+  reads the serialized blob and `pack_stage()` lays the parameters out in the console layout of one stage (section
+  3.5, D3D-448), refusing anything that would spill; both bind points use it. `pack()`, the earlier default mapping
+  (from s0, two dwords per table), stays in the model and its tests but no longer places a root signature.
 - **GPU address arena** (section 3.3, when the device has `bufferDeviceAddress`): one host-visible,
   device-addressable buffer, 256 MiB by default (`LEONIDA_ARENA_MB`, at most 4095 MiB, so every VA fits 32-bit
   table pointers).
@@ -773,10 +773,11 @@ The compute path, end to end:
     so descriptor bytes the application writes itself are what shaders load.
   - Upload and readback buffers keep their own memory, and their VA is their device address minus the heap base.
   - Shader programs (FSSM blobs) are copied in as the code base.
-- **`CreateRootSignature`** parses the blob with `parse_rts0` and keeps each parameter's place in two layouts:
-  `pack()` for the graphics bind point and `pack_stage(Stage::Compute)` for the compute one (from s4, one dword per
-  table; section 3.5, D3D-448). A signature neither can place (more than 32 user dwords: the spill layout is open; the
-  translated shaders have no below-base spill-pointer candidates) is refused with both reasons; one only a single layout places is created with a log line, and binding it at the other bind point
+- **`CreateRootSignature`** parses the blob with `parse_rts0` and keeps each parameter's place in two layouts, both
+  the console's (`pack_stage`, one dword per table; section 3.5): the graphics bind point from user-data dword 8, the
+  same for the vertex, pixel and mesh stages, and the compute one from s4 (D3D-448). A signature neither can place
+  (past s31: the spill layout is open; the translated shaders have no below-base spill-pointer candidates) is refused
+  with both reasons; one only a single layout places is created with a log line, and binding it at the other bind point
   invalidates the list. Before
   that it answers as the host runtime does (`compare_invalid_arguments`, "root signature:", RTX 5070 / 621.14):
   `S_FALSE` for a null output whatever the blob, then `E_INVALIDARG` for a node other than node 0 or a DXBC
@@ -1684,8 +1685,8 @@ This is the least verifiable part of the layer. D3D12 gives the application a ro
 turns it into the user SGPRs (`s0..s31`) that the shader reads. The translator already copies those 32 dwords from
 push constants into `s0..s31`. The layer must produce them.
 
-The default mapping (implemented by `rt::rootsig::pack` in `runtime/src/root_signature.{h,cpp}`) follows root
-parameter order:
+The first default mapping (`rt::rootsig::pack` in `runtime/src/root_signature.{h,cpp}`, no longer used to place a
+root signature; the console layout below replaced it at both bind points) followed root parameter order:
 
 | Root parameter | User-data dwords |
 |---|---|
@@ -1721,14 +1722,27 @@ below 4 GiB). A parameter that does not fit goes, with every later one, to the s
     translated programs compatible (tables read at s4/s5 as 32-bit pointers, each root CBV's VA copied whole as
     two dwords from s6). The `pack()` layout contradicts 7 of them, which read the second table at s5, the first
     table's high half in that layout.
-- **Vertex/pixel/geometry s8 and mesh s16: a hypothesis.** It rests on the census above only; no signature
-  confirms these bases, and visibility is not modelled (every parameter takes its place in every stage).
+- **Vertex, pixel and mesh: measured on the game's PSO cache** ([pso_cache.md](pso_cache.md), "Root parameters in
+  user SGPRs"; `tools/psocache_root_sgprs.py --expect`). Every shader's 0x41 records name the user-data index and the
+  root parameter of each binding. Root parameter 0 is at index 8 in all 7,598 PS, 923 VS and 5,969 MS that bind it;
+  consecutive parameters step one index (table, constants) or two (root view); and the shaders of a pipeline place
+  every shared parameter at the same index (11,518 of 11,518 VS+PS and 10,726 of 10,726 MS+PS pipelines). Joined
+  to the translated programs by `HASH` digest, VS and PS read the first root argument at the SGPR the index names
+  (9,062 PS, 1,107 VS) and mesh shaders 8 higher (6,924 of 7,060): the mesh stage keeps eight NGG system SGPRs
+  below its user data, which is the s16 of the census above. Visibility is not modelled, and the measurement gives
+  no reason to: the stages of a pipeline agree.
+- **Geometry s8: the census only.** The cache has no GS program, and the 195 GS read a 64-bit pointer at s8.
 
-The runtime uses the console layout for the **compute** bind point only. Graphics keeps `pack()`: every stage of a
-pipeline reads `s0..s31` from one push-constant block at offset 0 (`tools/rdna2spirv.py`, `ShaderUserData` in
-`runtime/src/vulkan_replay.h`), so a mesh shader (base s16) and a pixel shader (base s8) in one pipeline would need
-the same root argument at two offsets. That needs per-stage user-data windows in the translator's push-constant
-contract (D3D-448 follow-up). A root signature carries both layouts; one that only one of them can place is
+Both bind points use the console layout. Graphics takes it from user-data dword 8 (`rt::rootsig::kGraphicsUserDataBase`,
+`pack_stage(Stage::Pixel)`): every stage of a pipeline reads one push-constant block at offset 0 (`ShaderUserData`
+in `runtime/src/vulkan_replay.h`), and the translator loads a vertex or pixel shader's `s`*i* and a mesh shader's
+`s`*i*+8 (`rt::rootsig::user_data_shift`, `MS_USER_SHIFT` in `tools/rdna2spirv.py`) from dword *i*, so one block
+serves a mesh+pixel pipeline. That replaces the per-stage user-data windows this section once called for (D3D-448
+follow-up). A mesh shader sees dwords 0..23 (its `s8..s31`), so a graphics signature that reaches past dword 23
+would leave a mesh shader's last arguments unread; no shader in the cache comes close (the highest mesh read is
+s29). The layer leaves dwords 0..7 zero: in the vertex shader they are the driver's block (`s[0:1]` vertex-buffer
+table, `s2` base vertex, `s[4:5]` fetch-shader address, per five-star-recomp's notes), and filling them is open.
+A root signature carries both layouts; one that only one of them can place is
 created, and binding it at the other bind point invalidates the command list (`Close` returns `E_INVALIDARG`).
 `s0..s3` of a compute dispatch are the driver's block; the layer leaves them zero (109 CS read `s1` as a constant,
 42 `s3`; their meaning is open).
@@ -1793,7 +1807,8 @@ Xbox Series 1.0.2.1:
 What this does not settle:
 - **How many runtime-created signatures exceed the budget.** The containers carry none, so that count waits for
   signatures dumped from the executable.
-- **Why a particular `pack()` refusal happens.** `pack()` counts two dwords per table from s0, which the census
+- **Why a particular `pack()` refusal happened** (before the graphics bind point moved to the console layout).
+  `pack()` counts two dwords per table from s0, which the census
   above disagrees with, so its 32-dword limit and the console's budget need not agree. Whether a given refusal is
   that model or a real spill is open until the signature and its shaders are compared.
 - **A spill behind a pointer at or above the base.** It reads the same as a table pointer, so the census can't
@@ -3683,7 +3698,7 @@ M0–M2 do not need the executable.
 | # | Scope | What it proves | Done when |
 |---|---|---|---|
 | **M0** | `D3D12XboxCreateDevice` and the measured device overrides (heap start handles in RAX), one direct queue, allocator/list, fence, fake DXGI factory/adapter/output, `ALLOW_DISPLAY` back buffers, frame events + `PresentX` (DXGI swapchain only if the game creates one), clear + present | COM interception, the known Xbox device entry point and ABI overrides, presentation (`PresentX` + frame events, or swapchain), frame loop, clean shutdown | A window shows a stable clear colour for 60 frames, no Vulkan validation errors, every D3D12 call traced. **Synthetic part met** by `d3d12_present_test`: 60 frames through the proxy on Vulkan, validation clean, colour checked in the presented images and on screen where GDI can read it. Still open: the game's present front end (frame events + `PresentX`, or a DXGI swapchain) and the per-call trace |
-| **M1** | Root signature with root constants (mask the measured `0x03000000` flag byte on a copy), one translated VS+PS, PSO, vertex buffer in the arena, draw, push constants `s0..s31` + heap base | PSO translation, shader hash lookup, vertex input, root-constant packing, heap base, present | The triangle matches a CPU/GPU reference; the existing texture-test style comparison passes with error 0. **Met with stand-in shaders** by `d3d12_draw_test`: every pixel of two indexed draws and a culled triangle matches, through the proxy, validation clean. With translated game shaders most of them declare bindings, which M2 (pipelines bind set 0) lets through. **M1.5 (D3D-53) met with translator output** by `d3d12_translated_draw_test`: see below |
+| **M1** | Root signature with root constants (mask the measured `0x03000000` flag byte on a copy), one translated VS+PS, PSO, vertex buffer in the arena, draw, push constants (root arguments from `s8`) + heap base | PSO translation, shader hash lookup, vertex input, root-constant packing, heap base, present | The triangle matches a CPU/GPU reference; the existing texture-test style comparison passes with error 0. **Met with stand-in shaders** by `d3d12_draw_test`: every pixel of two indexed draws and a culled triangle matches, through the proxy, validation clean. With translated game shaders most of them declare bindings, which M2 (pipelines bind set 0) lets through. **M1.5 (D3D-53) met with translator output** by `d3d12_translated_draw_test`: see below |
 | **M1.5** | The same, with real translator output: hand-written RDNA2 VS+PS, PSO found by FSSM hash, vertex fetch through a V# loaded from the user-data table, a root constant, a table in the arena, the code base | The push-constant, vertex-fetch and code-base contracts on translated code | Met by `d3d12_translated_draw_test`: three draws, every pixel off the triangle's edge exact in a float target, validation clean on the AMD Radeon 880M and the RTX 5070 Laptop. An upload buffer behind a V# is not supported (section 3.3) |
 | **M2** | Descriptor heap (heap slots 9/10 return in RAX), `CreateShaderResourceView`, sampler, root descriptor table, hash-table insert, bindless sampling | The full D3D12 descriptor path and the shader's T#/S# contract | A textured quad matches the synthetic 8×8 gradient or a known texture with error 0; the hash table has the expected entries. **Synthetic part met** by `d3d12_m2_textured_test`: through the proxy, D3D12 API only, a shader-visible CBV/SRV/UAV heap and a sampler heap (start handles from slots 9/10), two 8×8 textures uploaded with `Map` + `CopyTextureRegion`, `CreateShaderResourceView` and a POINT `CreateSampler`, a root signature of two descriptor tables, `SetDescriptorHeaps`, `SetGraphicsRootDescriptorTable` and `DrawIndexedInstanced` of a quad whose PS is translator output (`ps_m2.asm`: `s_load` of the T# and the S# from the tables, `image_sample`). Every one of the 4096 pixels matches the CPU-computed gradient (left half) and its point reflection (right half, second table) with error 0, and the hash table holds a distinct non-zero index for each of the two T#s and the S# and none for bytes nothing created; validation clean on the AMD Radeon 880M and the RTX 5070 Laptop. The layer change it needed: pipelines whose shader declares set-0 bindings (graphics and compute) were refused; their layout now holds the device's bindless set 0 and replay binds it at every draw and dispatch. Still open: shaders of the game itself (direct heap indexing, unbounded tables, static samplers, descriptors the game writes itself), no host D3D12/WARP byte comparison (the reference is computed on the CPU). Formats, mips and arrays through a PSO: `d3d12_m2_formats_test` samples an 8×8 BC1 and an 8×8 BC7 texture with 4 mips each and an R8G8B8A8 2D array of 3 slices through the same path (every subresource uploaded at its `GetCopyableFootprints` layout, POINT samplers with `MinLOD = MaxLOD` pinning each level, a view from mip 1, two array views read by `ps_m2_array.asm`); all 12 cases match the CPU with error 0, validation clean on the RTX 4070 Ti SUPER, with no layer change needed |
 | **M3** | Depth/stencil, multiple render targets, resource barriers, render passes, occlusion queries, fences, 2–3 frames in flight; run the game's first frames | Real frame structure and the first game code | The game reaches its first rendered frame (loading screen/menu or whatever the executable does) or stops on a single unsupported call with a clean report. **Synthetic part met** by `d3d12_m3_frame_test`: through the proxy, D3D12 API only, six frames through a ring of three slots (three frames in flight; each slot has its own allocator, list, targets, depth buffer, query and fence, and a frame waits with `SetEventOnCompletion` + an event for the fence its slot signalled three frames earlier before reading back and recording the slot again). Pass 1 draws three rectangles from root constants with translator-output shaders (`vs_m3.asm`, `ps_m3.asm`, hand-written RDNA2) through `OMSetRenderTargets` into two render targets (R8G8B8A8_UNORM and R32_FLOAT) and a `D24_UNORM_S8_UINT` depth/stencil buffer (the layer substitutes D32_SFLOAT_S8_UINT on the Radeon; the RTX has it natively): depth LESS with write, stencil REPLACE with references 1 and 2, then a draw with no depth test whose stencil test is EQUAL; before the far rectangle, a single-output probe (`ps_m3_query.asm`) uses the same depth/stencil tests with color, depth and stencil writes disabled, inside `BeginQuery`/`EndQuery(OCCLUSION)`, and `ResolveQueryData` writes its sample count to a readback buffer. The actual far-rectangle draw still writes both render targets with depth/stencil writes enabled. Resource barriers move the first target RENDER_TARGET → PIXEL_SHADER_RESOURCE\|COPY_SOURCE and the second to COPY_SOURCE (and back at the next frame, from resources created in those states). Pass 2 samples the first target through an SRV in a descriptor table (the M2 path) with `ps_m3_post.asm` into a third target. Every pixel of all three targets (the float one bit for bit) matches the CPU reference with error 0 in each of the six frames, and the single-output probe's occlusion count equals the exact visible area of the far rectangle in each frame (3555 samples over the six frames). The original version was validation clean (including synchronization validation) on the AMD Radeon 880M and the RTX 5070 Laptop; current probe/isolation results are recorded below. @whattheflop's run on #1584 (GeForce RTX 3080 and a Ryzen 7 9800X3D Radeon iGPU) sampled the fences with nonblocking reads after each submit and saw 1, 2, 3, 1, 2, 3 slots still incomplete on NVIDIA and 1, 1, 1, 1, 1, 1 on AMD: up to three slots in flight on NVIDIA, one on AMD (sampled fence completion; GPU execution overlap was not measured). **Still open for M3:** render passes (`BeginRenderPass`, D3D-27) are not exercised, nor `BINARY_OCCLUSION`, occlusion during pipeline statistics (D3D-162), MSAA or depth/stencil copies and read-only DSV states in this test; the game's own first frames need the executable |

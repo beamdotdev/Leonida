@@ -151,7 +151,7 @@ int main() {
         return true;
     };
     const auto root_signature = [&](ID3D12Device* device, Ref<ID3D12RootSignature>& root) {
-        // [0] two constants (s0, s1: offset), [1] a root CBV (s2:s3: tint), as in d3d12_draw_test.
+        // [0] two constants (dwords 8, 9: offset), [1] a root CBV (dwords 10, 11: tint), as in d3d12_draw_test.
         D3D12_ROOT_PARAMETER params[2] = {};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[0].Constants = {0, 0, 2};

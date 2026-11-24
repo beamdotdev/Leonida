@@ -129,12 +129,22 @@ constexpr uint32_t kMaxD3d12Cost = 64;
 //     in this layout equals the program's RSRC2 USER_SGPR count in 29 of 29, and the programs read the tables and
 //     root CBVs at exactly these SGPRs (tools/rootsig_census.py --disasm). The game's compute census agrees (lowest
 //     pointer s4, one-dword tables).
-//   - vertex/pixel/geometry s8 and mesh s16: a hypothesis from the corpus census only (lowest pointer SGPR per stage);
-//     no signature confirms them, and visibility is not modelled (every parameter takes its place in every stage).
+//   - vertex, pixel and mesh: measured on the game's PSO cache (docs/pso_cache.md, "Root parameters in user SGPRs";
+//     tools/psocache_root_sgprs.py). Each shader's tag-0x41 records give the user-data index and the root parameter of
+//     every binding: parameter 0 is at index 8 in all 7,598 PS, 923 VS and 5,969 MS that bind it, tables and
+//     constant parameters advance one index, root descriptors two, and the shaders of a pipeline agree on every
+//     parameter they share (11,518 of 11,518 VS+PS, 10,726 of 10,726 MS+PS). So one layout from index 8 serves every
+//     graphics stage. The mesh stage's hardware puts user-data index i in SGPR i + 8 (user_data_shift), which is why
+//     its census reads start at s16; the translator loads mesh SGPR i + 8 from user-data dword i.
+//   - geometry s8: the census only (no GS program is in the PSO cache).
+// Visibility is not modelled (every parameter takes its place in every stage); the measurement above is consistent
+// with that: the stages of a pipeline place shared parameters alike.
 // A parameter that does not fit goes to the console's spill array behind s[0:1] (compute, section 7) together with
 // every parameter after it; that array is not modelled, so such a signature is refused, never truncated.
 enum class Stage : uint32_t { Vertex = 0, Pixel = 1, Geometry = 2, Compute = 3, Mesh = 4 };
 
+// The physical SGPR that holds the stage's first root argument (what a shader's census reads see). For the mesh
+// stage it is user_data_shift(Mesh) above the user-data index the root signature places it at.
 [[nodiscard]] constexpr uint32_t stage_base(Stage stage) noexcept {
     switch (stage) {
         case Stage::Compute:
@@ -148,6 +158,15 @@ enum class Stage : uint32_t { Vertex = 0, Pixel = 1, Geometry = 2, Compute = 3, 
     }
     return 8;
 }
+
+// How far above its user-data index a stage's hardware puts a user SGPR: 8 for the mesh stage (NGG keeps eight
+// system SGPRs below the user data), 0 elsewhere. The translator applies it (tools/rdna2spirv.py loads mesh SGPR i + 8
+// from user-data dword i), so the user-data dwords the runtime pushes are the same for every graphics stage.
+[[nodiscard]] constexpr uint32_t user_data_shift(Stage stage) noexcept { return stage == Stage::Mesh ? 8 : 0; }
+
+// The user-data dword of a graphics pipeline's first root argument, for every graphics stage: stage_base(Pixel), which
+// is also stage_base(Vertex) and stage_base(Mesh) - user_data_shift(Mesh).
+constexpr uint32_t kGraphicsUserDataBase = 8;
 
 // User SGPRs one parameter takes in the console layout (see Stage).
 [[nodiscard]] constexpr uint32_t stage_dwords(ParamType type, uint32_t num_values) noexcept {

@@ -1,12 +1,19 @@
 ; M2 pixel shader: samples a texture found through two root descriptor tables. Run: d3d12_m2_textured_test.
-; User data from the root signature ([0] a table holding one SRV, [1] a table holding one sampler):
-;   s[0:1] = console VA of the SRV table's first slot: the 32 bytes of the T# CreateShaderResourceView wrote
-;   s[2:3] = console VA of the sampler table's first slot: the 16 bytes of the S# CreateSampler wrote
+; User data from the root signature ([0] a table holding one SRV, [1] a table holding one sampler), in the console's
+; graphics layout (root arguments from s8, one SGPR per table: docs/d3d12_vulkan.md section 3.5):
+;   s8 = console VA of the SRV table's first slot: the 32 bytes of the T# CreateShaderResourceView wrote
+;   s9 = console VA of the sampler table's first slot: the 16 bytes of the S# CreateSampler wrote
+; A table's VA is 32 bits (the heaps live below 4 GiB), so the shader pairs it with a zero high half, as the game's
+; shaders do: s[0:1] = (s8, 0) and s[2:3] = (s9, 0).
 ; The translator hashes the T# and the S# the shader loads and looks both up in the descriptor hash table (set 0,
 ; binding 2); the indices pick the image (binding 0) and the sampler (binding 1) in the bindless set.
 ; attr0.xy = (u, v), 0..1 over the quad.   mrt0 = the texel under the pixel.
 ; fssm-at: 0x10
 ; fssm-data: 0x324d5350 0x20535020
+s_mov_b32 s0, s8
+s_mov_b32 s1, 0
+s_mov_b32 s2, s9
+s_mov_b32 s3, 0
 s_load_dwordx8 s[8:15], s[0:1], 0x0
 s_load_dwordx4 s[16:19], s[2:3], 0x0
 s_waitcnt lgkmcnt(0)

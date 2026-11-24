@@ -189,6 +189,8 @@ _FLOAT_FMT_MASKS = tuple(
 
 # User SGPRs s0..s(USER_SGPRS-1) are initialised from push constants (128 bytes = Vulkan's guaranteed minimum).
 USER_SGPRS = 32
+# A mesh shader's user-data dword i is its SGPR i + MS_USER_SHIFT (NGG system SGPRs below; rt::rootsig::user_data_shift).
+MS_USER_SHIFT = 8
 
 # v_pipeflush (GFX10 VOP1) only flushes the VALU pipeline: no register, memory or EXEC effect to translate.
 # s_icache_inv invalidates the instruction cache; s_ttracedata / s_ttracedata_imm send thread-trace data;
@@ -15192,10 +15194,15 @@ def assemble(gen):
         fn += [pc_tail_chain("%ud_base_lo_p", 1, gen.cu), pc_tail_chain("%ud_base_hi_p", 2, gen.cu)] + HEAP_BASE_ENTRY
     if gen.uses_codebase:
         fn += [pc_tail_chain("%ud_code_lo_p", 3, gen.cu), pc_tail_chain("%ud_code_hi_p", 4, gen.cu)]
-    for i in range(USER_SGPRS):
+    # Mesh shaders (NGG) keep eight system SGPRs below their user data: user-data dword i is SGPR i + MS_USER_SHIFT
+    # (measured on the game's PSO cache, docs/pso_cache.md "Root parameters in user SGPRs"), so the runtime pushes the
+    # same dwords to every graphics stage of a pipeline. s0..s7 then start at zero (s3, the merged-wave info, is set
+    # below) and dwords USER_SGPRS - MS_USER_SHIFT.. have no SGPR in a mesh shader.
+    shift = MS_USER_SHIFT if ms else 0
+    for i in range(USER_SGPRS - shift):
         fn += [f"%ud{i}p = OpAccessChain %_ptr_PC_uint %user_data %c0 {gen.cu(i)}",
                f"%ud{i} = OpLoad %uint %ud{i}p",
-               f"%ud{i}s = OpAccessChain %_ptr_Function_uint %sgpr {gen.cu(i)}",
+               f"%ud{i}s = OpAccessChain %_ptr_Function_uint %sgpr {gen.cu(i + shift)}",
                f"OpStore %ud{i}s %ud{i}"]
     if vs:
         # The hardware's VS input VGPRs are zero-based: v0 is the vertex id without the draw's base vertex and v3
@@ -16544,7 +16551,7 @@ def translate(path):
         # Mesh shaders run as NGG wave64 programs. PSV0 (DXBC) gives NumThreads, MaxOutputVertices/Primitives and
         # the output topology. System inputs (Mesa radv_shader_args.c, mesh as NGG on GFX10.3): v5 = first launch
         # vertex ID of the lane, groupIndex * NumThreads + lane ("vertex_id" slot); the merged-wave-info SGPR (s3 here) holds the wave id in [27:24]; user data
-        # follows in s16.. (from push constants, like every stage).
+        # follows in s16.. (root arguments from user-data dword 8 = SGPR 8 + MS_USER_SHIFT; see the copy in assemble).
         psv = mesh_psv(path, info["name"])
         if psv is None:
             raise Unsupported("mesh PSV0")
