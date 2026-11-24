@@ -132,7 +132,8 @@ int main() {
                                                            reinterpret_cast<void**>(&device.p))));
         rt::d3d12::set_device_outer(inner, device.p);
 
-        // Root signature: [0] two constants (s0, s1: offset), [1] a root CBV (s2:s3: tint).
+        // Root signature: [0] two constants (s8, s9: offset), [1] a root CBV (s10:s11: tint); the console's graphics
+        // layout starts at s8 (docs/d3d12_vulkan.md section 3.5).
         D3D12_ROOT_PARAMETER params[2] = {};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[0].Constants = {0, 0, 2};

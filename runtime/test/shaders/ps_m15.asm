@@ -5,7 +5,8 @@
 ; code base, dwords 34-35, is the console VA of the FSSM program the layer uploaded). The table of four floats is at
 ; blob offset 0x100: 0x100 - 4 = 0xfc. build.py writes that blob (fssm-at / fssm-data below) next to the SPIR-V, and
 ; adds its SHA-256 to the index, as the translator's --fssm-dir does for the game's programs.
-;   scale = (0.5, 2.0, 1.0, 1.0)      s4 = bias, a float from the root constants (s2, s3 are the VS offset)
+;   scale = (0.5, 2.0, 1.0, 1.0)      s11 = bias, a float from the root constants (s9, s10 are the VS offset;
+;   vs_m15.asm), copied to s4 right after s_getpc_b64 because the table load fills s8..s11
 ;   mrt0  = (r * 0.5 + bias, g * 2.0 + bias, b * 1.0 + bias, a * 1.0)
 ; The test draws colour (0.25, 0.5, 0.75, 1) with bias 0 and 0.125, and colour (1, 0, 0.5, 1) with bias 0.25. Every
 ; value is a short binary fraction, so the float render target holds the exact result, bit for bit:
@@ -16,6 +17,7 @@
 ; fssm-at: 0x100
 ; fssm-data: 0x3f000000 0x40000000 0x3f800000 0x3f800000
 s_getpc_b64 s[6:7]
+s_mov_b32 s4, s11
 s_add_u32 s6, s6, 0xfc
 s_addc_u32 s7, s7, 0
 s_load_dwordx4 s[8:11], s[6:7], 0x0

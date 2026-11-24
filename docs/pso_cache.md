@@ -169,8 +169,8 @@ duplicates are removed (four on 23,625 of 25,471 PSOs); the eight layouts are sh
 | 0x401 | 32-bit constants, `a` = count | medium |
 | 0x100 | unknown, not consumed | low |
 | 0x41 offset (w2) | descriptor index inside the table, 8-byte granular | medium |
-| 0x41 `b` | register space | medium |
-| 0x41 `a` | base register for descriptors | medium |
+| 0x41 `b` | register space; **corrected** for the per-shader records below: byte +0x15 is the user-data index of the binding's root argument | superseded |
+| 0x41 `a` | base register for descriptors; **corrected** for the per-shader records below: byte +0x16 is the root parameter index, +0x17 is 0 | superseded |
 | 0x41 size | element size 2, 4 or 8 | high |
 | 0x41 key (w3) | unknown | low |
 | 0x41 count (w4) | descriptor count | low |
@@ -190,6 +190,45 @@ Under both table models all 25,471 graphics PSOs fit 32 dwords (15 dwords with t
 0x41 entries as the range contents, take each 0x401 as a constants parameter, and pack them in root-parameter
 order. The record does not carry that order, so it would have to come from SS or from the shader's reads, which
 is not measured.
+
+## Root parameters in user SGPRs
+
+Each graphics PSO record also has seven shader slots at +0x38, `{i32 shader index, i32 meta entry}`, -1 when empty:
+slot 0 holds the pixel shader, 1 the vertex shader and 2 the mesh shader (five-star-recomp's reading of the record,
+checked here; the stage record at +8 above is a different field). A shader's meta entry is a kind-2 header, its 0x41
+and 0x42 records and the 0x43 `HASH` digest ([shader_library.md](shader_library.md)). In its 0x41 records, byte +0x14
+is the size in dwords, **+0x15 the user-data index** of the binding's root argument (a table's address, a root view's
+first dword, the root constants; 0 for a static sampler) and **+0x16 the root parameter index**.
+
+`tools/psocache_root_sgprs.py` counts what those bytes say over the whole cache (Xbox Series 1.0.2.1):
+
+```
+python -I tools/psocache_root_sgprs.py <cache> --dxbc <work>/shaders/dxbc --index <work>/shaders/spirv/index.json --expect
+```
+
+| Measured | PS | VS | MS |
+|---|---:|---:|---:|
+| distinct shaders | 9,333 | 1,241 | 7,060 |
+| root parameter 0 at user-data index 8 | 7,598 of 7,598 | 923 of 923 | 5,969 of 5,969 |
+| a parameter at two indices | 0 | 0 | 0 |
+| lowest SGPR the program reads at s8 or above, minus the lowest index | 0 in 9,062 | 0 in 1,107 | **8** in 6,924 |
+
+- **Packing.** Consecutive parameters step one index (a table or a constants parameter) or two (a root view): over
+  the three stages, a step of one parameter moves one index 26,867 times and two 6,239 times, and a step of *k*
+  parameters never moves fewer than *k* or more than 2*k* indices.
+- **One layout per pipeline.** The vertex or mesh shader and the pixel shader of a pipeline give every shared
+  parameter the same index: 11,518 of 11,518 VS+PS pipelines that share one and 10,726 of 10,726 MS+PS pipelines
+  (1,867 VS+PS pipelines share none).
+- **The mesh stage is 8 SGPRs higher.** The join takes the carved container with the same `HASH` digest and its
+  translated program's `user_sgpr_reads`. Vertex and pixel programs read their first root argument at the SGPR the
+  index names; mesh programs read it 8 higher (6,311 of them read every bound index at +8 and none at +0). That is the
+  s16 the user-SGPR census sees for mesh shaders ([d3d12_vulkan.md](d3d12_vulkan.md) section 3.5): NGG keeps eight
+  system SGPRs below the user data.
+
+So the console's graphics root layout is the compute one from base 8 (one dword per table, `rt::rootsig::pack_stage`),
+in one set of user-data dwords that every graphics stage of a pipeline shares. The runtime uses it for the graphics bind
+point, and the translator loads a mesh shader's SGPR *i* + 8 from user-data dword *i*. No GS program is in the cache,
+so the geometry stage's base stays the census's. The tool prints counts only.
 
 ## What remains unknown
 

@@ -4,6 +4,10 @@
 ; attr0.xy = (u, v), 0..1 over the quad.   mrt0 = the texel under the pixel.
 ; fssm-at: 0x10
 ; fssm-data: 0x324d5350 0x59525241
+s_mov_b32 s0, s8
+s_mov_b32 s1, 0
+s_mov_b32 s2, s9
+s_mov_b32 s3, 0
 s_load_dwordx8 s[8:15], s[0:1], 0x0
 s_load_dwordx4 s[16:19], s[2:3], 0x0
 s_waitcnt lgkmcnt(0)

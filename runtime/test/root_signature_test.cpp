@@ -419,6 +419,21 @@ int main() {
         check(ms.ok && ms.first_sgpr == std::vector<uint32_t>({16, 19, 20}) && ms.end_sgpr == 22,
               "pack_stage: mesh stage from s16");
 
+        // The graphics bind point: one set of user-data dwords for every graphics stage (the game's PSO cache). The
+        // mesh stage's SGPRs are the same dwords user_data_shift(Mesh) higher, which the translator applies.
+        check(user_data_shift(Stage::Mesh) == 8 && user_data_shift(Stage::Pixel) == 0 &&
+                  user_data_shift(Stage::Vertex) == 0 && user_data_shift(Stage::Compute) == 0 &&
+                  user_data_shift(Stage::Geometry) == 0,
+              "user_data_shift: 8 for the mesh stage, 0 elsewhere");
+        check(kGraphicsUserDataBase == stage_base(Stage::Pixel) && kGraphicsUserDataBase == stage_base(Stage::Vertex) &&
+                  kGraphicsUserDataBase == stage_base(Stage::Mesh) - user_data_shift(Stage::Mesh),
+              "graphics user data starts at dword 8 for the vertex, pixel and mesh stages");
+        const StagePackResult vs = pack_stage(mixed, Stage::Vertex);
+        bool same = vs.ok && vs.first_sgpr == ps.first_sgpr && ms.first_sgpr.size() == ps.first_sgpr.size();
+        for (size_t i = 0; same && i < ps.first_sgpr.size(); ++i)
+            same = ms.first_sgpr[i] - user_data_shift(Stage::Mesh) == ps.first_sgpr[i];
+        check(same, "pack_stage: vertex, pixel and (shifted) mesh place every parameter at the same dword");
+
         // An empty signature is valid and uses nothing.
         const StagePackResult empty = pack_stage(RootSignature{}, Stage::Compute);
         check(empty.ok && empty.first_sgpr.empty() && empty.end_sgpr == 4, "pack_stage: empty signature");
@@ -447,6 +462,11 @@ int main() {
         check(pack_stage(tables, Stage::Mesh).ok, "pack_stage: 16 tables fill the mesh stage exactly");
         tables.params.push_back(table());
         check(!pack_stage(tables, Stage::Mesh).ok, "pack_stage: a 17th table spills on mesh");
+        // The graphics bind point (pack_stage(Pixel)) takes 24 dwords from s8; a mesh shader sees the first 16.
+        tables.params.assign(24, table());
+        check(pack_stage(tables, Stage::Pixel).ok, "pack_stage: 24 tables fill the graphics layout exactly");
+        tables.params.push_back(table());
+        check(!pack_stage(tables, Stage::Pixel).ok, "pack_stage: a 25th table spills on graphics");
     }
 
     // pack_stage keeps pack()'s validation.

@@ -352,15 +352,16 @@ std::unique_ptr<WindowPresenter> create_window_presenter(ID3D12Device* device, H
 
 // Where each root parameter's arguments go in the 32 user-data dwords the translated shaders read (docs section
 // 3.5). Built when a Vulkan device creates the root signature. A signature can be bound at either bind point, so it
-// carries both layouts:
-//   - graphics: rt::rootsig::pack() (from s0, two dwords per table; D3D-448 keeps it until per-stage user-data windows
-//     exist, because a mesh shader (s16) and a pixel shader (s8) share one push-constant block);
-//   - compute: rt::rootsig::pack_stage(Stage::Compute), the measured console layout (from s4, one dword per table).
+// carries both layouts, each the console's (rt::rootsig::pack_stage: one dword per table and per constant, two per
+// root view):
+//   - graphics: from user-data dword 8, the same dwords for the vertex, pixel and mesh stages (measured on the game's
+//     PSO cache; the translator moves a mesh shader's SGPRs up by rt::rootsig::user_data_shift(Mesh));
+//   - compute: from s4.
 // A layout that refuses the signature is marked unusable; binding the signature there invalidates the list.
 struct RootArgumentLayout {
     struct Parameter {
         rt::rootsig::ParamType type;
-        std::uint32_t user_offset;     // graphics: first dword; unused for a parameter with no dwords
+        std::uint32_t user_offset;     // graphics: first dword (kNoSgpr when the graphics layout refused the signature)
         std::uint32_t constant_count;  // constants only
         std::uint32_t compute_offset = rt::rootsig::kNoSgpr;  // compute: first user SGPR
     };
