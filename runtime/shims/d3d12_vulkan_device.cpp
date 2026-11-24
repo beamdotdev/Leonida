@@ -4309,6 +4309,26 @@ std::filesystem::path shader_cache_disk_path(const D3D12_SHADER_CACHE_SESSION_DE
     return dir / name;
 }
 
+// ID3D12Device5::CreateLifetimeTracker's tracker. Objects become owned by a tracker only through the runtime's own
+// internal paths, never through the public API, so this tracker owns nothing. It matches the host runtime as
+// d3d12_existing_heap_test measured it on the RTX 3070 (driver 621.01) and WARP:
+// - DestroyOwnedObject refuses every object with E_INVALIDARG (committed buffers, heaps, fences, another tracker,
+//   the tracker itself) and changes neither the object's reference count nor anything else.
+// - The owner gets no reference and no LifetimeStateUpdated call.
+// - The tracker is an ID3D12DeviceChild but not ID3D12Pageable.
+// The host faults on a null object; here a null object is refused with E_INVALIDARG instead.
+class LifetimeTracker final
+    : public Child<LifetimeTracker, ID3D12LifetimeTrackerStubs, ID3D12Object, ID3D12DeviceChild,
+                   ID3D12LifetimeTracker> {
+public:
+    // {3e8b5d61-2f4a-4c97-a0d3-6b1e7c95f2a4}
+    static constexpr GUID kTag{0x3e8b5d61, 0x2f4a, 0x4c97, {0xa0, 0xd3, 0x6b, 0x1e, 0x7c, 0x95, 0xf2, 0xa4}};
+
+    HRESULT STDMETHODCALLTYPE DestroyOwnedObject(ID3D12DeviceChild*) override {
+        return d3d12_trace::result("ID3D12LifetimeTracker::DestroyOwnedObject", E_INVALIDARG);
+    }
+};
+
 class ShaderCacheSession final
     : public Child<ShaderCacheSession, ID3D12ShaderCacheSessionStubs, ID3D12Object, ID3D12DeviceChild,
                    ID3D12ShaderCacheSession> {
@@ -6679,8 +6699,8 @@ public:
 
     // Heaps and placed resources (section 3.3). A heap reserves its size in the arena, so a buffer placed at a
     // 64 KiB-aligned offset is simply that offset into the arena, and its console VA is the heap's place plus it.
-    // Existing-memory heaps and lifetime trackers. CheckFeatureSupport reports EXISTING_HEAPS unsupported, so a call
-    // the host accepts stays E_NOTIMPL; the host refuses a null address, a file mapping that is not a handle and a
+    // Existing-memory heaps and lifetime trackers. CheckFeatureSupport reports EXISTING_HEAPS unsupported, so an
+    // existing-heap call the host accepts stays E_NOTIMPL; the host refuses a null address, a file mapping that is not a handle and a
     // null lifetime owner with E_INVALIDARG on WARP, NVIDIA and Intel (d3d12_existing_heap_test). Docs:
     // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device3-openexistingheapfromaddress
     HRESULT STDMETHODCALLTYPE OpenExistingHeapFromAddress(const void* address, REFIID, void** out) override {
@@ -6701,12 +6721,15 @@ public:
         return d3d12_trace::result(method, E_NOTIMPL);
     }
 
-    HRESULT STDMETHODCALLTYPE CreateLifetimeTracker(ID3D12LifetimeOwner* owner, REFIID, void** out) override {
+    // A tracker that owns nothing (LifetimeTracker above); the host hands one out for any owner, without taking a
+    // reference to it, and refuses an IID other than the tracker's own interfaces with E_NOINTERFACE.
+    HRESULT STDMETHODCALLTYPE CreateLifetimeTracker(ID3D12LifetimeOwner* owner, REFIID riid, void** out) override {
         constexpr auto method = "ID3D12Device5::CreateLifetimeTracker";
         if (out) *out = nullptr;
         if (!owner || !out) return d3d12_trace::result(method, E_INVALIDARG);
-        log_once("CreateLifetimeTracker (not supported)", 0);
-        return d3d12_trace::result(method, E_NOTIMPL);
+        auto* tracker = new LifetimeTracker();
+        tracker->attach_device(identity());
+        return d3d12_trace::result(method, hand_out(tracker, riid, out));
     }
 
     HRESULT STDMETHODCALLTYPE CreateHeap(const D3D12_HEAP_DESC* desc, REFIID riid, void** out) override {
